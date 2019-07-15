@@ -1,0 +1,182 @@
+---
+title: "main3"
+author: "Joshua Bela"
+date: "June 15, 2019"
+output: word_document
+---
+
+Introduction:
+
+What is the nature of this program?
+This program is designed to predict real estate prices given a train set with 91 variables.
+
+The code in this file is simplified, as it refers to an abundance of imported custom functions which are defined in a local r script named 'functions, local.r'.
+
+import libraries
+```{r}
+library(magrittr)
+library(dplyr) #for select() and union()
+library(plyr)# for the mapvalues function
+library(randomForest)
+# library(tree)
+# library(party)# for tree visualization
+# library(caret) #for train function
+# library(Metrics)#for rmsle function
+# library(gam)
+# library(ggplot2)
+# library(Hmisc)# for rcorr correlation function
+```
+
+import data and functions
+These will be named the original train and test sets and will not be modified.
+```{r}
+data_orig = read.csv("./data/train.csv")
+data_test_orig = read.csv("./data/test.csv")
+source('./functions, local.r')
+```
+
+Print out a list of variables in the test data that contain NA values.
+```{r}
+# hasna(data_orig)
+```
+
+declare train and test data
+These may be modified, unlike the original data frames.
+```{r}
+data = data_orig
+# rename the response variable as 'y' for convenience
+data$y = data$SalePrice
+data = data %>% select(-SalePrice)
+# remove the Id variables as it is not predictive
+data = data %>% select(-Id)
+
+data_test = data_test_orig
+```
+
+preliminary feature selection and engineering for train set
+```{r}
+# In each call of split_data() below, the first argument is a factor and the second argument is the numerical value associated with one of the observed factor levels.
+# We are creating new numeric variables for each factor level.  These variables are set to 0 if that factor level does not apply to a particular observation.
+# These sets of numeric variables will replace the original 2 variables.
+
+# We are doing this because it turns out that...
+# only a small subset of the factor levels have predictive numeric information associated with them.
+
+data = split_data(
+  data,
+  'MasVnrType',
+  'MasVnrArea'
+)
+data = split_data(
+  data,
+  'BsmtFinType1',
+  'BsmtFinSF1'
+)
+data = split_data(
+  data,
+  'BsmtFinType2',
+  'BsmtFinSF2'
+)
+data = split_data(
+  data,
+  'MiscFeature',
+  'MiscVal'
+)
+```
+preliminary feature selection and engineering for test set
+```{r}
+data_test = split_data(
+  data_test,
+  'MasVnrType',
+  'MasVnrArea'
+)
+data_test = split_data(
+  data_test,
+  'BsmtFinType1',
+  'BsmtFinSF1'
+)
+data_test = split_data(
+  data_test,
+  'BsmtFinType2',
+  'BsmtFinSF2'
+)
+data_test = split_data(
+  data_test,
+  'MiscFeature',
+  'MiscVal'
+)
+
+```
+
+Imputation for missing data
+```{r}
+# For each factor, observations of NA are replaced with a new factor level 'NA'.
+data = data %>% impute_NA_factor()
+data_test = data_test %>% impute_NA_factor()
+
+# For each numeric variable, observations of NA are replaced with 0.
+data = data %>% impute_0()
+data_test = data_test %>% impute_0()
+```
+
+Ensure that the levels of each factor of the test contain the levels of the factors in the train set.
+```{r}
+data_test = match_levels(data, data_test)
+```
+
+Assuming Ordinality for all factors
+Change each factor level to an integer and order the integers according to the corresponding median value of the response variable.
+Assuming ordinality reduces processing time.
+```{r}
+# result = data %>% ordinal_conversion(data_test)
+# data = result$data
+# data_test = result$data_test
+```
+
+determine the best variables
+Forward selection will be performed; at each iteration, when a single variable is added, all other variables are considered eligible for addition thereafter.
+This is very expensive, but also exhaustively thorough.
+If there were too many variables, another selection method would be necessary.
+```{r}
+result = forward_selection(data, 250, maxnodes = NULL)
+goodvariables = result$variables; #goodvariables
+```
+
+Build Random Forest based on the best variables discovered above.
+```{r}
+model_randomforest = randomForest(
+  y ~ .,
+  data = data[,c('y', goodvariables)],
+  ntree = 500,
+  mtry = ncol(data[,c('y', goodvariables)]) - 1,
+  replace = T
+)
+predictions = model_randomforest$predicted
+rmsle = sqrt(mean((log(predictions) - log(data$y))^2)); rmsle
+# 0.1512991
+# 0.1467202
+```
+
+Generate predictions for the test set;
+write the predictions to a CSV file.
+```{r}
+predictions_test = predict(model_randomforest, data_test)
+
+write.csv(
+  data.frame(Id = data_test$Id, SalePrice = predictions_test),
+  "./data/submission.csv",
+  row.names = F
+)
+```
+
+
+
+
+
+
+
+
+
+
+
+
