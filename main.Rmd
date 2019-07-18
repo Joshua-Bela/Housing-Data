@@ -2,29 +2,31 @@
 title: "main3"
 author: "Joshua Bela"
 date: "June 15, 2019"
-output: word_document
+output:
+  html_document:
+    df_print: paged
+  pdf_document: default
+  word_document: default
 ---
-
 Introduction:
-
 What is the nature of this program?
-This program is designed to predict real estate prices given a train set with 91 variables.
 
+This program is designed to predict real estate prices given a train set with 91 variables.
 The code in this file is simplified, as it refers to an abundance of imported custom functions which are defined in a local r script named 'functions, local.r'.
+
+
+
+
 
 import libraries
 ```{r}
-library(magrittr)
+library(magrittr)# for pipelines
+library(mice) #for multivariate imputation via chained equations
 library(dplyr) #for select() and union()
 library(plyr)# for the mapvalues function
 library(randomForest)
-# library(tree)
-# library(party)# for tree visualization
-# library(caret) #for train function
-# library(Metrics)#for rmsle function
-# library(gam)
-# library(ggplot2)
-# library(Hmisc)# for rcorr correlation function
+library(doParallel)# for parallel core processing
+library(caret)# for tune grid searching
 ```
 
 import data and functions
@@ -37,7 +39,7 @@ source('./functions, local.r')
 
 Print out a list of variables in the test data that contain NA values.
 ```{r}
-# hasna(data_orig)
+hasna(data_orig)
 ```
 
 declare train and test data
@@ -110,7 +112,7 @@ data_test = split_data(
 
 Imputation for missing data
 ```{r}
-# For each factor, observations of NA are replaced with a new factor level 'NA'.
+# For each factor, observations of NA are replaced with a new factor level 'na'.
 data = data %>% impute_NA_factor()
 data_test = data_test %>% impute_NA_factor()
 
@@ -124,43 +126,74 @@ Ensure that the levels of each factor of the test contain the levels of the fact
 data_test = match_levels(data, data_test)
 ```
 
-Assuming Ordinality for all factors
-Change each factor level to an integer and order the integers according to the corresponding median value of the response variable.
-Assuming ordinality reduces processing time.
+If there are any variables in the test set which have 'na' factor level observations and there are no corresponding 'na' observations in the test set to prepare for them, then we will revert the 'na' observations in the test set back to NA values.
 ```{r}
-# result = data %>% ordinal_conversion(data_test)
-# data = result$data
-# data_test = result$data_test
+for(i in colnames(data_test)){
+  if(sum(data_test[,i] == 'na') > 0 && sum(data[,i] == 'na') == 0){
+    print(i)
+    data_test[,i] = ifelse(
+      data_test[,i] == 'na',
+      NA,
+      data_test[,i]
+    ) %>% as.factor()
+  }
+}
 ```
 
-determine the best variables
-Forward selection will be performed; at each iteration, when a single variable is added, all other variables are considered eligible for addition thereafter.
-This is very expensive, but also exhaustively thorough.
-If there were too many variables, another selection method would be necessary.
+Next, these NA values will be replaced by MICE imputation.
 ```{r}
-result = forward_selection(data, 250, maxnodes = NULL)
-goodvariables = result$variables; #goodvariables
-```
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+set.seed(1)
 
-Build Random Forest based on the best variables discovered above.
-```{r}
-model_randomforest = randomForest(
-  y ~ .,
-  data = data[,c('y', goodvariables)],
-  ntree = 500,
-  mtry = ncol(data[,c('y', goodvariables)]) - 1,
-  replace = T
+# Deterministic regression imputation via mice
+imp <- mice(data_test, method = "polyreg", m = 1, nnet.MaxNWts = Inf, maxit = 20)
+# Store data
+data_imp <- complete(imp)# Multiple Imputation
+
+stopCluster(cl) # Turn off parallel processing and free up the cores.
+registerDoSEQ()
+
+# this takes a long time, so store the resulting data frame as a CSV
+write.csv(
+  data_imp,
+  "./data/data_test_processed.csv",
+  row.names = F
 )
-predictions = model_randomforest$predicted
-rmsle = sqrt(mean((log(predictions) - log(data$y))^2)); rmsle
-# 0.1512991
-# 0.1467202
+```
+
+```{r}
+trControl <- trainControl(method = "boot",
+                          number = 1,
+                          savePredictions = 'all',
+                          allowParallel = TRUE
+                          )
+tuneGrid <- expand.grid(
+  mtry = seq(25:35)
+)
+
+cl <- makePSOCKcluster(6)
+registerDoParallel(cl)
+set.seed(1)
+model <- train(
+  y ~ .,
+  data = subset(data, select = -MiscFeature.TenC),
+  method = 'rf',
+  trControl = trControl,
+  tuneGrid = tuneGrid
+)
+stopCluster(cl) # Turn off parallel processing and free up the cores.
+registerDoSEQ()
+
+predictions = predict(model, subset(data, select = -y))
+"RMSLE =" %>% paste(sqrt(mean((log(predictions) - log(data$y))^2)))
 ```
 
 Generate predictions for the test set;
 write the predictions to a CSV file.
 ```{r}
-predictions_test = predict(model_randomforest, data_test)
+predictions_test = predict(model, data_imp)
+length(predictions_test)
 
 write.csv(
   data.frame(Id = data_test$Id, SalePrice = predictions_test),
